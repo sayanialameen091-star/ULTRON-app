@@ -1,0 +1,365 @@
+name: Build Ultron
+# Stage 1: this one file creates the whole app and builds it.
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Write the app files
+        run: |
+          mkdir -p app/src/main/java/com/ultron/app
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Ultron"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.ultron.app"
+              compileSdk = 34
+
+              defaultConfig {
+                  applicationId = "com.ultron.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "0.1"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:label="Ultron"
+                  android:theme="@android:style/Theme.Material.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".ListenService"
+                      android:exported="false"
+                      android:foregroundServiceType="microphone" />
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/java/com/ultron/app/MainActivity.kt <<'EOF'
+          package com.ultron.app
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import androidx.core.app.ActivityCompat
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : Activity() {
+
+              private lateinit var status: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setBackgroundColor(Color.parseColor("#080304"))
+                      setPadding(48, 48, 48, 48)
+                  }
+
+                  val title = TextView(this).apply {
+                      text = "ULTRON"
+                      textSize = 36f
+                      setTextColor(Color.parseColor("#FF4B2B"))
+                      setTypeface(Typeface.DEFAULT_BOLD)
+                      gravity = Gravity.CENTER
+                  }
+
+                  status = TextView(this).apply {
+                      text = "Tap Start. Ultron will keep listening in the background."
+                      textSize = 16f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                  }
+
+                  fun makeButton(label: String, action: () -> Unit): Button {
+                      return Button(this).apply {
+                          text = label
+                          setOnClickListener { action() }
+                      }
+                  }
+
+                  val params = { LinearLayout.LayoutParams(
+                      LinearLayout.LayoutParams.MATCH_PARENT,
+                      LinearLayout.LayoutParams.WRAP_CONTENT
+                  ).apply { topMargin = 32 } }
+
+                  root.addView(title, params())
+                  root.addView(status, params())
+                  root.addView(makeButton("START LISTENING") { startListening() }, params())
+                  root.addView(makeButton("STOP") { stopListening() }, params())
+                  root.addView(makeButton("ALLOW BACKGROUND USE (BATTERY)") { openBatterySettings() }, params())
+
+                  setContentView(root)
+              }
+
+              private fun startListening() {
+                  val missing = mutableListOf<String>()
+                  if (!granted(Manifest.permission.RECORD_AUDIO)) {
+                      missing.add(Manifest.permission.RECORD_AUDIO)
+                  }
+                  if (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS)) {
+                      missing.add(Manifest.permission.POST_NOTIFICATIONS)
+                  }
+                  if (missing.isNotEmpty()) {
+                      ActivityCompat.requestPermissions(this, missing.toTypedArray(), 1)
+                      return
+                  }
+                  launchService()
+              }
+
+              private fun granted(permission: String): Boolean {
+                  return ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED
+              }
+
+              private fun launchService() {
+                  ContextCompat.startForegroundService(this, Intent(this, ListenService::class.java))
+                  status.text = "Ultron is listening. Lock the screen and speak: the mic level in the notification should move."
+              }
+
+              private fun stopListening() {
+                  stopService(Intent(this, ListenService::class.java))
+                  status.text = "Stopped."
+              }
+
+              private fun openBatterySettings() {
+                  startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+              }
+
+              override fun onRequestPermissionsResult(
+                  requestCode: Int,
+                  permissions: Array<out String>,
+                  grantResults: IntArray
+              ) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (granted(Manifest.permission.RECORD_AUDIO)) {
+                      launchService()
+                  } else {
+                      status.text = "Microphone permission is needed for Ultron to listen."
+                  }
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/ultron/app/ListenService.kt <<'EOF'
+          package com.ultron.app
+
+          import android.annotation.SuppressLint
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.media.AudioFormat
+          import android.media.AudioRecord
+          import android.media.MediaRecorder
+          import android.os.Build
+          import android.os.IBinder
+          import androidx.core.app.NotificationCompat
+          import kotlin.math.sqrt
+
+          class ListenService : Service() {
+
+              @Volatile
+              private var running = false
+              private var worker: Thread? = null
+              private val channelId = "ultron_listen"
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (intent?.action == "STOP") {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  createChannel()
+                  val notification = buildNotification("Starting...")
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                      } else {
+                          startForeground(1, notification)
+                      }
+                  } catch (e: Exception) {
+                      stopSelf()
+                      return START_NOT_STICKY
+                  }
+                  if (!running) {
+                      running = true
+                      worker = Thread { listenLoop() }.also { it.start() }
+                  }
+                  return START_STICKY
+              }
+
+              @SuppressLint("MissingPermission")
+              private fun listenLoop() {
+                  val rate = 16000
+                  val minSize = AudioRecord.getMinBufferSize(
+                      rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
+                  )
+                  val recorder = AudioRecord(
+                      MediaRecorder.AudioSource.MIC,
+                      rate,
+                      AudioFormat.CHANNEL_IN_MONO,
+                      AudioFormat.ENCODING_PCM_16BIT,
+                      maxOf(minSize, 4096)
+                  )
+                  if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+                      update("Microphone could not start")
+                      running = false
+                      return
+                  }
+                  recorder.startRecording()
+                  val buffer = ShortArray(512)
+                  var peak = 0.0
+                  var lastUpdate = 0L
+                  while (running) {
+                      val n = recorder.read(buffer, 0, buffer.size)
+                      if (n < 0) break
+                      if (n == 0) continue
+                      var sum = 0.0
+                      for (i in 0 until n) {
+                          sum += buffer[i] * buffer[i].toDouble()
+                      }
+                      val rms = sqrt(sum / n)
+                      if (rms > peak) peak = rms
+                      val now = System.currentTimeMillis()
+                      if (now - lastUpdate > 1000) {
+                          update("Listening... mic level " + (peak / 327.0).toInt())
+                          peak = 0.0
+                          lastUpdate = now
+                      }
+                  }
+                  recorder.stop()
+                  recorder.release()
+              }
+
+              private fun createChannel() {
+                  val channel = NotificationChannel(
+                      channelId, "Ultron listening", NotificationManager.IMPORTANCE_LOW
+                  )
+                  getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+              }
+
+              private fun buildNotification(text: String): Notification {
+                  val open = PendingIntent.getActivity(
+                      this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE
+                  )
+                  val stop = PendingIntent.getService(
+                      this, 1,
+                      Intent(this, ListenService::class.java).setAction("STOP"),
+                      PendingIntent.FLAG_IMMUTABLE
+                  )
+                  return NotificationCompat.Builder(this, channelId)
+                      .setContentTitle("Ultron")
+                      .setContentText(text)
+                      .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+                      .setOngoing(true)
+                      .setOnlyAlertOnce(true)
+                      .setContentIntent(open)
+                      .addAction(android.R.drawable.ic_delete, "Stop", stop)
+                      .build()
+              }
+
+              private fun update(text: String) {
+                  getSystemService(NotificationManager::class.java).notify(1, buildNotification(text))
+              }
+
+              override fun onDestroy() {
+                  running = false
+                  stopForeground(STOP_FOREGROUND_REMOVE)
+                  super.onDestroy()
+              }
+          }
+          EOF
+      - name: Build the app
+        run: gradle assembleDebug --no-daemon --stacktrace
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ultron-debug
+          path: app/build/outputs/apk/debug/app-debug.apk
